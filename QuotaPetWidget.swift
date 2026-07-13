@@ -87,8 +87,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
         panel.contentView = widget
-        widget.frame = NSRect(origin: .zero, size: DoodleMetrics.compactDisplaySize)
-        widget.bounds = NSRect(x: 0, y: 0, width: DoodleMetrics.logicalWidth, height: DoodleMetrics.compactLogicalHeight)
         panel.center()
         panel.orderFrontRegardless()
         self.panel = panel
@@ -106,10 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hoverPanel.isOpaque = false
         hoverPanel.hasShadow = false
         hoverPanel.ignoresMouseEvents = true
-        let card = DoodleQuotaCard(frame: NSRect(origin: .zero, size: DoodleMetrics.cardLogicalSize))
+        let card = DoodleQuotaCard(frame: NSRect(origin: .zero, size: DoodleMetrics.cardDisplaySize))
         hoverPanel.contentView = card
-        card.frame = NSRect(origin: .zero, size: DoodleMetrics.cardDisplaySize)
-        card.bounds = NSRect(origin: .zero, size: DoodleMetrics.cardLogicalSize)
         self.hoverPanel = hoverPanel
 #endif
 
@@ -1218,27 +1214,29 @@ private enum DoodlePalette {
 
 private enum DoodleDrawing {
     static func paperPath(in rect: NSRect) -> NSBezierPath {
+        let scale = DoodleMetrics.scale
         let path = NSBezierPath()
-        path.move(to: NSPoint(x: rect.minX + 13, y: rect.minY + 12))
-        path.curve(to: NSPoint(x: rect.maxX - 14, y: rect.minY + 9), controlPoint1: NSPoint(x: rect.midX - 44, y: rect.minY + 5), controlPoint2: NSPoint(x: rect.maxX - 52, y: rect.minY + 7))
-        path.curve(to: NSPoint(x: rect.maxX - 10, y: rect.maxY - 15), controlPoint1: NSPoint(x: rect.maxX - 5, y: rect.minY + 24), controlPoint2: NSPoint(x: rect.maxX - 8, y: rect.maxY - 50))
-        path.curve(to: NSPoint(x: rect.minX + 16, y: rect.maxY - 10), controlPoint1: NSPoint(x: rect.maxX - 76, y: rect.maxY - 5), controlPoint2: NSPoint(x: rect.midX - 58, y: rect.maxY - 5))
-        path.curve(to: NSPoint(x: rect.minX + 9, y: rect.minY + 19), controlPoint1: NSPoint(x: rect.minX + 6, y: rect.maxY - 34), controlPoint2: NSPoint(x: rect.minX + 6, y: rect.minY + 53))
+        path.move(to: NSPoint(x: rect.minX + 13 * scale, y: rect.minY + 12 * scale))
+        path.curve(to: NSPoint(x: rect.maxX - 14 * scale, y: rect.minY + 9 * scale), controlPoint1: NSPoint(x: rect.midX - 44 * scale, y: rect.minY + 5 * scale), controlPoint2: NSPoint(x: rect.maxX - 52 * scale, y: rect.minY + 7 * scale))
+        path.curve(to: NSPoint(x: rect.maxX - 10 * scale, y: rect.maxY - 15 * scale), controlPoint1: NSPoint(x: rect.maxX - 5 * scale, y: rect.minY + 24 * scale), controlPoint2: NSPoint(x: rect.maxX - 8 * scale, y: rect.maxY - 50 * scale))
+        path.curve(to: NSPoint(x: rect.minX + 16 * scale, y: rect.maxY - 10 * scale), controlPoint1: NSPoint(x: rect.maxX - 76 * scale, y: rect.maxY - 5 * scale), controlPoint2: NSPoint(x: rect.midX - 58 * scale, y: rect.maxY - 5 * scale))
+        path.curve(to: NSPoint(x: rect.minX + 9 * scale, y: rect.minY + 19 * scale), controlPoint1: NSPoint(x: rect.minX + 6 * scale, y: rect.maxY - 34 * scale), controlPoint2: NSPoint(x: rect.minX + 6 * scale, y: rect.minY + 53 * scale))
         path.close()
         return path
     }
 
     static func drawTape(in rect: NSRect) {
+        let scale = DoodleMetrics.scale
         let tape = NSBezierPath()
-        tape.move(to: NSPoint(x: rect.minX + 2, y: rect.minY + 3))
-        tape.line(to: NSPoint(x: rect.maxX - 3, y: rect.minY))
-        tape.line(to: NSPoint(x: rect.maxX, y: rect.maxY - 3))
+        tape.move(to: NSPoint(x: rect.minX + 2 * scale, y: rect.minY + 3 * scale))
+        tape.line(to: NSPoint(x: rect.maxX - 3 * scale, y: rect.minY))
+        tape.line(to: NSPoint(x: rect.maxX, y: rect.maxY - 3 * scale))
         tape.line(to: NSPoint(x: rect.minX, y: rect.maxY))
         tape.close()
         DoodlePalette.tape.setFill()
         tape.fill()
         NSColor.black.withAlphaComponent(0.10).setStroke()
-        tape.lineWidth = 1
+        tape.lineWidth = scale
         tape.stroke()
     }
 
@@ -1254,7 +1252,7 @@ private enum DoodleDrawing {
         fill.setFill()
         star.fill()
         DoodlePalette.ink.setStroke()
-        star.lineWidth = 2.4
+        star.lineWidth = 2.4 * DoodleMetrics.scale
         star.lineJoinStyle = .round
         star.stroke()
     }
@@ -1273,7 +1271,7 @@ private enum DoodleDrawing {
         fill.setFill()
         sparkle.fill()
         DoodlePalette.ink.setStroke()
-        sparkle.lineWidth = 2.2
+        sparkle.lineWidth = 2.2 * DoodleMetrics.scale
         sparkle.stroke()
     }
 }
@@ -1282,9 +1280,10 @@ private final class DoodlePaperView: NSView {
     override var isFlipped: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
-        let paper = DoodleDrawing.paperPath(in: bounds.insetBy(dx: 2, dy: 2))
+        let scale = DoodleMetrics.scale
+        let paper = DoodleDrawing.paperPath(in: bounds.insetBy(dx: 2 * scale, dy: 2 * scale))
         let shadow = paper.copy() as! NSBezierPath
-        let transform = AffineTransform(translationByX: 6, byY: 7)
+        let transform = AffineTransform(translationByX: 6 * scale, byY: 7 * scale)
         shadow.transform(using: transform)
         DoodlePalette.ink.setFill()
         shadow.fill()
@@ -1292,25 +1291,25 @@ private final class DoodlePaperView: NSView {
         DoodlePalette.paper.setFill()
         paper.fill()
         DoodlePalette.ink.setStroke()
-        paper.lineWidth = 3.1
+        paper.lineWidth = 3.1 * scale
         paper.lineJoinStyle = .round
         paper.stroke()
 
         NSGraphicsContext.saveGraphicsState()
         paper.addClip()
         DoodlePalette.line.setStroke()
-        for y in stride(from: CGFloat(30), through: bounds.maxY - 12, by: 17) {
+        for y in stride(from: CGFloat(30) * scale, through: bounds.maxY - 12 * scale, by: 17 * scale) {
             let line = NSBezierPath()
-            line.move(to: NSPoint(x: 9, y: y))
-            line.line(to: NSPoint(x: bounds.maxX - 8, y: y))
-            line.lineWidth = 1
+            line.move(to: NSPoint(x: 9 * scale, y: y))
+            line.line(to: NSPoint(x: bounds.maxX - 8 * scale, y: y))
+            line.lineWidth = scale
             line.stroke()
         }
         NSGraphicsContext.restoreGraphicsState()
 
-        DoodleDrawing.drawTape(in: NSRect(x: bounds.midX - 35, y: 0, width: 70, height: 17))
-        DoodleDrawing.drawSparkle(center: NSPoint(x: 28, y: 37), radius: 9, fill: DoodlePalette.mint)
-        DoodleDrawing.drawStar(center: NSPoint(x: bounds.maxX - 28, y: 36), radius: 10, fill: DoodlePalette.yellow)
+        DoodleDrawing.drawTape(in: NSRect(x: bounds.midX - 35 * scale, y: 0, width: 70 * scale, height: 17 * scale))
+        DoodleDrawing.drawSparkle(center: NSPoint(x: 28 * scale, y: 37 * scale), radius: 9 * scale, fill: DoodlePalette.mint)
+        DoodleDrawing.drawStar(center: NSPoint(x: bounds.maxX - 28 * scale, y: 36 * scale), radius: 10 * scale, fill: DoodlePalette.yellow)
     }
 }
 
@@ -1331,7 +1330,7 @@ private final class DoodleIconButton: NSView {
         self.accent = accent
         self.hoverChanged = hoverChanged
         super.init(frame: .zero)
-        imageView.image = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 19, weight: .bold))
+        imageView.image = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 19 * DoodleMetrics.scale, weight: .bold))
         imageView.contentTintColor = DoodlePalette.ink
         imageView.imageScaling = .scaleProportionallyDown
         imageView.frame = iconFrame(hovered: false)
@@ -1376,13 +1375,13 @@ private final class DoodleIconButton: NSView {
         let shadow = NSShadow()
         shadow.shadowColor = DoodlePalette.ink
         shadow.shadowBlurRadius = 0
-        shadow.shadowOffset = NSSize(width: 2.5, height: -2.5)
+        shadow.shadowOffset = NSSize(width: 2.5 * DoodleMetrics.scale, height: -2.5 * DoodleMetrics.scale)
         shadow.set()
         let path = NSBezierPath(ovalIn: rect)
         (isHovering ? accent : .white).setFill()
         path.fill()
         DoodlePalette.ink.setStroke()
-        path.lineWidth = 2.5
+        path.lineWidth = 2.5 * DoodleMetrics.scale
         path.stroke()
     }
 
@@ -1396,11 +1395,13 @@ private final class DoodleIconButton: NSView {
     }
 
     private func buttonFrame(hovered: Bool) -> NSRect {
-        NSRect(x: hovered ? 4 : 6, y: hovered ? 2 : 5, width: 46, height: 46)
+        let scale = DoodleMetrics.scale
+        return NSRect(x: (hovered ? 4 : 6) * scale, y: (hovered ? 2 : 5) * scale, width: 46 * scale, height: 46 * scale)
     }
 
     private func iconFrame(hovered: Bool) -> NSRect {
-        NSRect(x: hovered ? 17 : 18, y: hovered ? 15 : 18, width: 20, height: 20)
+        let scale = DoodleMetrics.scale
+        return NSRect(x: (hovered ? 17 : 18) * scale, y: (hovered ? 15 : 18) * scale, width: 20 * scale, height: 20 * scale)
     }
 
     private var title: String {
@@ -1465,32 +1466,33 @@ private final class DoodleExpandButton: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let scale = DoodleMetrics.scale
         let tape = NSBezierPath()
-        tape.move(to: NSPoint(x: 2, y: 3))
-        tape.line(to: NSPoint(x: bounds.maxX - 3, y: 1))
-        tape.line(to: NSPoint(x: bounds.maxX - 1, y: bounds.maxY - 3))
-        tape.line(to: NSPoint(x: 1, y: bounds.maxY - 1))
+        tape.move(to: NSPoint(x: 2 * scale, y: 3 * scale))
+        tape.line(to: NSPoint(x: bounds.maxX - 3 * scale, y: scale))
+        tape.line(to: NSPoint(x: bounds.maxX - scale, y: bounds.maxY - 3 * scale))
+        tape.line(to: NSPoint(x: scale, y: bounds.maxY - scale))
         tape.close()
         DoodlePalette.tape.withAlphaComponent(isHovering ? 1 : 0.9).setFill()
         tape.fill()
         NSColor.black.withAlphaComponent(isHovering ? 0.22 : 0.12).setStroke()
-        tape.lineWidth = 1
+        tape.lineWidth = scale
         tape.stroke()
 
         let centerX = bounds.midX
-        let centerY = bounds.midY + (isHovering ? -0.6 : 0)
+        let centerY = bounds.midY + (isHovering ? -0.6 * scale : 0)
         let chevron = NSBezierPath()
         if isExpanded {
-            chevron.move(to: NSPoint(x: centerX - 5, y: centerY + 2))
-            chevron.line(to: NSPoint(x: centerX, y: centerY - 3))
-            chevron.line(to: NSPoint(x: centerX + 5, y: centerY + 2))
+            chevron.move(to: NSPoint(x: centerX - 5 * scale, y: centerY + 2 * scale))
+            chevron.line(to: NSPoint(x: centerX, y: centerY - 3 * scale))
+            chevron.line(to: NSPoint(x: centerX + 5 * scale, y: centerY + 2 * scale))
         } else {
-            chevron.move(to: NSPoint(x: centerX - 5, y: centerY - 2))
-            chevron.line(to: NSPoint(x: centerX, y: centerY + 3))
-            chevron.line(to: NSPoint(x: centerX + 5, y: centerY - 2))
+            chevron.move(to: NSPoint(x: centerX - 5 * scale, y: centerY - 2 * scale))
+            chevron.line(to: NSPoint(x: centerX, y: centerY + 3 * scale))
+            chevron.line(to: NSPoint(x: centerX + 5 * scale, y: centerY - 2 * scale))
         }
         DoodlePalette.ink.setStroke()
-        chevron.lineWidth = 2.1
+        chevron.lineWidth = 2.1 * scale
         chevron.lineCapStyle = .round
         chevron.lineJoinStyle = .round
         chevron.stroke()
@@ -1504,12 +1506,13 @@ private final class DoodleSummaryBadge: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        label.font = NSFont(name: "ChalkboardSE-Bold", size: 11.5) ?? .systemFont(ofSize: 11.5, weight: .semibold)
+        let scale = DoodleMetrics.scale
+        label.font = NSFont(name: "ChalkboardSE-Bold", size: 11.5 * scale) ?? .systemFont(ofSize: 11.5 * scale, weight: .semibold)
         label.textColor = DoodlePalette.ink
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 2
         label.cell?.wraps = false
-        label.frame = NSRect(x: 13, y: 5, width: max(0, bounds.width - 26), height: 28)
+        label.frame = NSRect(x: 13 * scale, y: 5 * scale, width: max(0, bounds.width - 26 * scale), height: 28 * scale)
         addSubview(label)
     }
 
@@ -1517,21 +1520,22 @@ private final class DoodleSummaryBadge: NSView {
 
     override func layout() {
         super.layout()
-        label.frame = NSRect(x: 13, y: 5, width: max(0, bounds.width - 26), height: 28)
+        let scale = DoodleMetrics.scale
+        label.frame = NSRect(x: 13 * scale, y: 5 * scale, width: max(0, bounds.width - 26 * scale), height: 28 * scale)
     }
 
     func configure(title: String, subtitle: String) {
         let titleText = NSAttributedString(
             string: title,
             attributes: [
-                .font: NSFont(name: "ChalkboardSE-Bold", size: 11.5) ?? .systemFont(ofSize: 11.5, weight: .semibold),
+                .font: NSFont(name: "ChalkboardSE-Bold", size: 11.5 * DoodleMetrics.scale) ?? .systemFont(ofSize: 11.5 * DoodleMetrics.scale, weight: .semibold),
                 .foregroundColor: DoodlePalette.ink
             ]
         )
         let subtitleText = NSAttributedString(
             string: "\n" + subtitle,
             attributes: [
-                .font: NSFont(name: "ChalkboardSE", size: 10) ?? .systemFont(ofSize: 10, weight: .medium),
+                .font: NSFont(name: "ChalkboardSE", size: 10 * DoodleMetrics.scale) ?? .systemFont(ofSize: 10 * DoodleMetrics.scale, weight: .medium),
                 .foregroundColor: DoodlePalette.ink.withAlphaComponent(0.76)
             ]
         )
@@ -1541,21 +1545,22 @@ private final class DoodleSummaryBadge: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let scale = DoodleMetrics.scale
         let badge = NSBezierPath()
-        badge.move(to: NSPoint(x: 2, y: 3))
-        badge.line(to: NSPoint(x: bounds.maxX - 3, y: 1))
-        badge.line(to: NSPoint(x: bounds.maxX - 1, y: bounds.maxY - 4))
-        badge.line(to: NSPoint(x: 3, y: bounds.maxY - 1))
+        badge.move(to: NSPoint(x: 2 * scale, y: 3 * scale))
+        badge.line(to: NSPoint(x: bounds.maxX - 3 * scale, y: scale))
+        badge.line(to: NSPoint(x: bounds.maxX - scale, y: bounds.maxY - 4 * scale))
+        badge.line(to: NSPoint(x: 3 * scale, y: bounds.maxY - scale))
         badge.close()
 
         let shadow = badge.copy() as! NSBezierPath
-        shadow.transform(using: AffineTransform(translationByX: 2, byY: 2))
+        shadow.transform(using: AffineTransform(translationByX: 2 * scale, byY: 2 * scale))
         DoodlePalette.ink.setFill()
         shadow.fill()
         DoodlePalette.mint.setFill()
         badge.fill()
         DoodlePalette.ink.setStroke()
-        badge.lineWidth = 1.8
+        badge.lineWidth = 1.8 * scale
         badge.lineJoinStyle = .round
         badge.stroke()
     }
@@ -1586,7 +1591,7 @@ private final class DoodleWidgetView: NSView {
         self.store = store
         self.detailChanged = detailChanged
         self.contentHeightChanged = contentHeightChanged
-        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 126))
+        super.init(frame: NSRect(origin: .zero, size: DoodleMetrics.compactDisplaySize))
         autoresizingMask = [.width, .height]
 
         paper = DoodlePaperView(frame: bounds)
@@ -1602,25 +1607,25 @@ private final class DoodleWidgetView: NSView {
         expandButton = DoodleExpandButton { [weak self] in
             self?.toggleExpansion()
         }
-        expandButton.frame = NSRect(x: 105, y: 0, width: 70, height: 18)
+        expandButton.frame = NSRect(x: 105 * DoodleMetrics.scale, y: 0, width: 70 * DoodleMetrics.scale, height: 18 * DoodleMetrics.scale)
         addSubview(expandButton)
 
         let hourly = DoodleIconButton(kind: .hourly, accent: DoodlePalette.lavender) { [weak self] kind, hovering in
             self?.updateHover(kind: kind, isHovering: hovering)
         }
-        hourly.frame = NSRect(x: 42, y: 48, width: 58, height: 54)
+        hourly.frame = NSRect(x: 42 * DoodleMetrics.scale, y: 48 * DoodleMetrics.scale, width: 58 * DoodleMetrics.scale, height: 54 * DoodleMetrics.scale)
         addSubview(hourly)
 
         let weekly = DoodleIconButton(kind: .weekly, accent: DoodlePalette.coral) { [weak self] kind, hovering in
             self?.updateHover(kind: kind, isHovering: hovering)
         }
-        weekly.frame = NSRect(x: 111, y: 48, width: 58, height: 54)
+        weekly.frame = NSRect(x: 111 * DoodleMetrics.scale, y: 48 * DoodleMetrics.scale, width: 58 * DoodleMetrics.scale, height: 54 * DoodleMetrics.scale)
         addSubview(weekly)
 
         let reset = DoodleIconButton(kind: .reset, accent: DoodlePalette.mint) { [weak self] kind, hovering in
             self?.updateHover(kind: kind, isHovering: hovering)
         }
-        reset.frame = NSRect(x: 180, y: 48, width: 58, height: 54)
+        reset.frame = NSRect(x: 180 * DoodleMetrics.scale, y: 48 * DoodleMetrics.scale, width: 58 * DoodleMetrics.scale, height: 54 * DoodleMetrics.scale)
         addSubview(reset)
         iconButtons = [hourly, weekly, reset]
 
@@ -1640,10 +1645,11 @@ private final class DoodleWidgetView: NSView {
     override func layout() {
         super.layout()
         paper?.frame = bounds
-        hourlySummary.frame = NSRect(x: 20, y: 127, width: bounds.width - 40, height: 36)
-        weeklySummary.frame = NSRect(x: 20, y: 171, width: bounds.width - 40, height: 36)
-        resetSummary.frame = NSRect(x: 20, y: 215, width: bounds.width - 40, height: 36)
-        expandButton?.frame = NSRect(x: bounds.midX - 35, y: 0, width: 70, height: 18)
+        let scale = DoodleMetrics.scale
+        hourlySummary.frame = NSRect(x: 20 * scale, y: 127 * scale, width: bounds.width - 40 * scale, height: 36 * scale)
+        weeklySummary.frame = NSRect(x: 20 * scale, y: 171 * scale, width: bounds.width - 40 * scale, height: 36 * scale)
+        resetSummary.frame = NSRect(x: 20 * scale, y: 215 * scale, width: bounds.width - 40 * scale, height: 36 * scale)
+        expandButton?.frame = NSRect(x: bounds.midX - 35 * scale, y: 0, width: 70 * scale, height: 18 * scale)
         iconButtons.forEach { $0.refreshHoverTracking() }
     }
 
@@ -1692,8 +1698,6 @@ private final class DoodleWidgetView: NSView {
         }
 
         let logicalHeight: CGFloat = isExpanded ? 270 : DoodleMetrics.compactLogicalHeight
-        setBoundsSize(NSSize(width: DoodleMetrics.logicalWidth, height: logicalHeight))
-        needsLayout = true
         contentHeightChanged(DoodleMetrics.displaySize(logicalHeight: logicalHeight).height)
 
         NSAnimationContext.runAnimationGroup { context in
@@ -1763,49 +1767,51 @@ private final class DoodleQuotaCard: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        textLabel.font = NSFont(name: "ChalkboardSE-Bold", size: 15) ?? .systemFont(ofSize: 15, weight: .bold)
+        let scale = DoodleMetrics.scale
+        textLabel.font = NSFont(name: "ChalkboardSE-Bold", size: 15 * scale) ?? .systemFont(ofSize: 15 * scale, weight: .bold)
         textLabel.textColor = DoodlePalette.ink
         textLabel.alignment = .center
         textLabel.lineBreakMode = .byWordWrapping
         textLabel.maximumNumberOfLines = 2
         textLabel.cell?.wraps = true
-        textLabel.frame = NSRect(x: 30, y: 39, width: 300, height: 44)
+        textLabel.frame = NSRect(x: 30 * scale, y: 39 * scale, width: 300 * scale, height: 44 * scale)
         addSubview(textLabel)
     }
 
     required init?(coder: NSCoder) { nil }
 
     override func draw(_ dirtyRect: NSRect) {
-        let paper = DoodleDrawing.paperPath(in: bounds.insetBy(dx: 2, dy: 4))
+        let scale = DoodleMetrics.scale
+        let paper = DoodleDrawing.paperPath(in: bounds.insetBy(dx: 2 * scale, dy: 4 * scale))
         let shadow = paper.copy() as! NSBezierPath
-        var transform = AffineTransform(translationByX: 6, byY: 7)
+        var transform = AffineTransform(translationByX: 6 * scale, byY: 7 * scale)
         shadow.transform(using: transform)
         DoodlePalette.ink.setFill()
         shadow.fill()
         DoodlePalette.paper.setFill()
         paper.fill()
         DoodlePalette.ink.setStroke()
-        paper.lineWidth = 3
+        paper.lineWidth = 3 * scale
         paper.stroke()
 
         let badge = NSBezierPath()
-        badge.move(to: NSPoint(x: 22, y: 31))
-        badge.line(to: NSPoint(x: 339, y: 26))
-        badge.line(to: NSPoint(x: 336, y: 88))
-        badge.line(to: NSPoint(x: 24, y: 92))
+        badge.move(to: NSPoint(x: 22 * scale, y: 31 * scale))
+        badge.line(to: NSPoint(x: 339 * scale, y: 26 * scale))
+        badge.line(to: NSPoint(x: 336 * scale, y: 88 * scale))
+        badge.line(to: NSPoint(x: 24 * scale, y: 92 * scale))
         badge.close()
         let badgeShadow = badge.copy() as! NSBezierPath
-        transform = AffineTransform(translationByX: 3, byY: 3)
+        transform = AffineTransform(translationByX: 3 * scale, byY: 3 * scale)
         badgeShadow.transform(using: transform)
         DoodlePalette.ink.setFill()
         badgeShadow.fill()
         DoodlePalette.mint.setFill()
         badge.fill()
         DoodlePalette.ink.setStroke()
-        badge.lineWidth = 2.2
+        badge.lineWidth = 2.2 * scale
         badge.stroke()
 
-        DoodleDrawing.drawTape(in: NSRect(x: bounds.midX - 31, y: 2, width: 62, height: 14))
+        DoodleDrawing.drawTape(in: NSRect(x: bounds.midX - 31 * scale, y: 2 * scale, width: 62 * scale, height: 14 * scale))
     }
 
     func configure(with detail: HoverDetail) {
