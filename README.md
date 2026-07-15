@@ -53,12 +53,14 @@ zsh package.sh
 open dist/QuotaPetWidget-DoodleNote.app
 ```
 
-The app is unsigned. macOS may require you to open it from Finder with Control-click > Open on first launch.
+The build script applies a local ad-hoc signature, but the app is not notarized with an Apple Developer ID. On first launch, macOS may report that the developer cannot be verified. If that happens, open Finder, Control-click (or right-click) the app, choose **Open**, then confirm **Open** once more.
 
 ## Project Files
 
 - `QuotaPetWidget.swift` - AppKit application and local quota reader
 - `Info.plist` - macOS application metadata
+- `assets/AppIcon.png` - Transparent hand-drawn app icon source
+- `assets/AppIcon.icns` - Packaged macOS app icon
 - `build.sh` - Builds either visual style
 - `package.sh` - Builds and packages both styles
 

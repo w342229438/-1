@@ -25,10 +25,14 @@ case "$STYLE" in
     ;;
 esac
 
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$MODULE_CACHE"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+cp "$ROOT/assets/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 plutil -replace CFBundleDisplayName -string "$DISPLAY_NAME" "$APP/Contents/Info.plist"
 plutil -replace CFBundleName -string "$DISPLAY_NAME" "$APP/Contents/Info.plist"
 plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$APP/Contents/Info.plist"
 swiftc "$ROOT/QuotaPetWidget.swift" -parse-as-library -module-cache-path "$MODULE_CACHE" "${SWIFT_FLAGS[@]}" -framework Cocoa -o "$APP/Contents/MacOS/QuotaPetWidget"
+xattr -cr "$APP"
+codesign --force --deep --sign - "$APP"
 echo "Built $APP"

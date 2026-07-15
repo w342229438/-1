@@ -6,3 +6,9 @@ dist/
 .build/
 DerivedData/
 *.xcuserstate
+
+# Generated app-icon intermediates
+assets/AppIcon-chroma.png
+assets/AppIcon-cropped.png
+assets/AppIcon-master.png
+assets/AppIcon.iconset/

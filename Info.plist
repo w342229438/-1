@@ -8,6 +8,8 @@
     <string>QuotaPetWidget</string>
     <key>CFBundleIdentifier</key>
     <string>local.codex.quota-pet-widget</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
