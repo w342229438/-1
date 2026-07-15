@@ -4,11 +4,11 @@ set -euo pipefail
 ROOT="${0:A:h}"
 OUTPUTS="$ROOT/dist"
 
-"$ROOT/build.sh" doodle
-"$ROOT/build.sh" glass
+zsh "$ROOT/build.sh" doodle
+zsh "$ROOT/build.sh" glass
 
-ditto -c -k --sequesterRsrc --keepParent "$OUTPUTS/QuotaPetWidget-DoodleNote.app" "$OUTPUTS/QuotaPetWidget-DoodleNote.zip"
-ditto -c -k --sequesterRsrc --keepParent "$OUTPUTS/QuotaPetWidget-ClassicGlass.app" "$OUTPUTS/QuotaPetWidget-ClassicGlass.zip"
+ditto -c -k --keepParent --norsrc --noextattr "$OUTPUTS/QuotaPetWidget-DoodleNote.app" "$OUTPUTS/QuotaPetWidget-DoodleNote.zip"
+ditto -c -k --keepParent --norsrc --noextattr "$OUTPUTS/QuotaPetWidget-ClassicGlass.app" "$OUTPUTS/QuotaPetWidget-ClassicGlass.zip"
 
 print "Packaged $OUTPUTS/QuotaPetWidget-DoodleNote.zip"
 print "Packaged $OUTPUTS/QuotaPetWidget-ClassicGlass.zip"

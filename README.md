@@ -10,15 +10,15 @@ A lightweight macOS floating widget for viewing locally available Codex quota in
 
 - Reads the locally available hourly and weekly quota windows from Codex session JSONL files.
 - Includes a compact hand-drawn note style and a classic glass style.
-- Shows reset time, remaining quota, and a manually maintained reset-credit summary.
-- Stays local: no network requests, account credentials, or telemetry.
+- Shows reset time, remaining quota, and automatically refreshed usage-limit reset credits.
+- Keeps authentication inside the installed Codex CLI; the widget does not read credentials or send telemetry.
 - Runs as a floating macOS accessory app with a menu-bar menu for settings and exit.
 
 ## Privacy and Data
 
 The widget reads `~/.codex/sessions/**/*.jsonl` on the same Mac to obtain locally recorded quota-window data. Those files are never uploaded by this project.
 
-Codex does not currently expose reset-credit inventory and expiration data in the local fields read by this widget. The reset-credit count and two expiration dates are therefore configured manually in the widget's Settings window.
+When automatic sync is enabled, the widget asks the locally installed Codex CLI for `account/rateLimits/read` once per minute. This provides the usage-limit reset count and available expiration dates without reading or storing account credentials. If the CLI or endpoint is unavailable, the reset count and dates configured in the widget's Settings window remain as the fallback.
 
 Do not commit your local Codex session files, screenshots containing account information, or built application archives.
 

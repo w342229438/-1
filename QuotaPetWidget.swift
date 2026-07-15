@@ -279,7 +279,7 @@ final class UsageStore {
         }
     }
 
-    var resetCredits: LimitResetCredits? {
+    private(set) var automaticResetCredits: RateLimitResetCreditSnapshot? {
         didSet { onChange?() }
     }
 
@@ -307,6 +307,9 @@ final class UsageStore {
 
     var onChange: (() -> Void)?
     private let codexReader = CodexRateLimitReader()
+    private let resetCreditReader = CodexRateLimitResetReader()
+    private var isSyncingResetCredits = false
+    private var lastResetCreditSyncAttempt = Date.distantPast
 
     init() {
         let defaults = UserDefaults.standard
@@ -314,7 +317,7 @@ final class UsageStore {
         resetDate = defaults.object(forKey: "resetDate") as? Date ?? Calendar.current.date(byAdding: .hour, value: 5, to: Date())!
         secondaryUsedPercent = defaults.object(forKey: "secondaryUsedPercent") as? Int
         secondaryResetDate = defaults.object(forKey: "secondaryResetDate") as? Date
-        resetCredits = nil
+        automaticResetCredits = nil
         manualResetCredits = defaults.object(forKey: "manualResetCredits") as? Int ?? 2
         manualResetExpirationDates = defaults.array(forKey: "manualResetExpirationDates") as? [Date] ?? UsageStore.defaultResetExpirationDates()
         automaticallySyncs = defaults.object(forKey: "automaticallySyncs") as? Bool ?? true
@@ -330,13 +333,53 @@ final class UsageStore {
 
     @discardableResult
     func syncFromCodexSessions() -> Bool {
+        syncResetCreditsIfNeeded()
         guard let snapshot = codexReader.latestSnapshot() else { return false }
         usedPercent = snapshot.primaryUsedPercent
         resetDate = snapshot.primaryResetDate
         secondaryUsedPercent = snapshot.secondaryUsedPercent
         secondaryResetDate = snapshot.secondaryResetDate
-        resetCredits = snapshot.resetCredits
         return true
+    }
+
+    var effectiveResetCreditCount: Int {
+        if automaticallySyncs, let automaticResetCredits {
+            return automaticResetCredits.availableCount
+        }
+        return manualResetCredits
+    }
+
+    var effectiveResetExpirationDates: [Date] {
+        if automaticallySyncs, let automaticResetCredits {
+            return automaticResetCredits.expirationDates
+        }
+        return manualResetExpirationDates
+    }
+
+    var hasAutomaticallySyncedResetCredits: Bool {
+        automaticallySyncs && automaticResetCredits != nil
+    }
+
+    private func syncResetCreditsIfNeeded() {
+        let now = Date()
+        guard !isSyncingResetCredits,
+              now.timeIntervalSince(lastResetCreditSyncAttempt) >= 60 else {
+            return
+        }
+
+        isSyncingResetCredits = true
+        lastResetCreditSyncAttempt = now
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let snapshot = self.resetCreditReader.latestSnapshot()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isSyncingResetCredits = false
+                if let snapshot {
+                    self.automaticResetCredits = snapshot
+                }
+            }
+        }
     }
 
     private static func defaultResetExpirationDates() -> [Date] {
@@ -354,13 +397,11 @@ private struct RateLimitSnapshot {
     let primaryResetDate: Date
     let secondaryUsedPercent: Int?
     let secondaryResetDate: Date?
-    let resetCredits: LimitResetCredits?
 }
 
-struct LimitResetCredits {
-    let hasCredits: Bool
-    let unlimited: Bool
-    let balance: String?
+struct RateLimitResetCreditSnapshot {
+    let availableCount: Int
+    let expirationDates: [Date]
 }
 
 private final class CodexRateLimitReader {
@@ -416,19 +457,11 @@ private final class CodexRateLimitReader {
                 continue
             }
             let secondary = limits["secondary"] as? [String: Any]
-            let credits = limits["credits"] as? [String: Any]
             return RateLimitSnapshot(
                 primaryUsedPercent: percent,
                 primaryResetDate: Date(timeIntervalSince1970: TimeInterval(resetsAt)),
                 secondaryUsedPercent: integer(from: secondary?["used_percent"]),
-                secondaryResetDate: integer(from: secondary?["resets_at"]).map { Date(timeIntervalSince1970: TimeInterval($0)) },
-                resetCredits: credits.map {
-                    LimitResetCredits(
-                        hasCredits: boolean(from: $0["has_credits"]),
-                        unlimited: boolean(from: $0["unlimited"]),
-                        balance: string(from: $0["balance"])
-                    )
-                }
+                secondaryResetDate: integer(from: secondary?["resets_at"]).map { Date(timeIntervalSince1970: TimeInterval($0)) }
             )
         }
         return nil
@@ -460,16 +493,170 @@ private final class CodexRateLimitReader {
         return nil
     }
 
-    private func boolean(from value: Any?) -> Bool {
-        if let bool = value as? Bool { return bool }
-        if let number = value as? NSNumber { return number.boolValue }
-        return false
+}
+
+private final class CodexRateLimitResetReader {
+    func latestSnapshot() -> RateLimitResetCreditSnapshot? {
+        guard let executableURL = codexExecutableURL(), let payload = requestPayload() else {
+            return nil
+        }
+
+        let process = Process()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let collector = CodexRateLimitResponseCollector()
+
+        process.executableURL = executableURL
+        process.arguments = ["app-server", "--stdio"]
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = FileHandle.nullDevice
+
+        outputPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                collector.finishWithoutResult()
+            } else {
+                collector.consume(data)
+            }
+        }
+
+        do {
+            try process.run()
+            inputPipe.fileHandleForWriting.write(payload)
+        } catch {
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            return nil
+        }
+
+        _ = collector.completed.wait(timeout: .now() + 20)
+        outputPipe.fileHandleForReading.readabilityHandler = nil
+        try? inputPipe.fileHandleForWriting.close()
+        if process.isRunning {
+            process.terminate()
+            process.waitUntilExit()
+        }
+        return collector.result()
     }
 
-    private func string(from value: Any?) -> String? {
-        if let string = value as? String { return string }
-        if let number = value as? NSNumber { return number.stringValue }
-        return nil
+    private func codexExecutableURL() -> URL? {
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser
+        var candidates: [URL] = []
+
+        if let chatGPTURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.chat") {
+            candidates.append(chatGPTURL.appendingPathComponent("Contents/Resources/codex"))
+        }
+        candidates.append(URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"))
+        candidates.append(home.appendingPathComponent("Applications/ChatGPT.app/Contents/Resources/codex"))
+        candidates.append(URL(fileURLWithPath: "/opt/homebrew/bin/codex"))
+        candidates.append(URL(fileURLWithPath: "/usr/local/bin/codex"))
+
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            candidates.append(contentsOf: path.split(separator: ":").map {
+                URL(fileURLWithPath: String($0)).appendingPathComponent("codex")
+            })
+        }
+
+        return candidates.first { fileManager.isExecutableFile(atPath: $0.path) }
+    }
+
+    private func requestPayload() -> Data? {
+        let messages: [[String: Any]] = [
+            [
+                "id": 1,
+                "method": "initialize",
+                "params": [
+                    "clientInfo": ["name": "codex-quota-widget", "version": "1.0"],
+                    "capabilities": ["experimentalApi": true]
+                ]
+            ],
+            ["method": "initialized", "params": [:]],
+            ["id": 2, "method": "account/rateLimits/read", "params": NSNull()]
+        ]
+
+        var payload = Data()
+        for message in messages {
+            guard let data = try? JSONSerialization.data(withJSONObject: message) else {
+                return nil
+            }
+            payload.append(data)
+            payload.append(0x0A)
+        }
+        return payload
+    }
+}
+
+private final class CodexRateLimitResponseCollector {
+    let completed = DispatchSemaphore(value: 0)
+
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var snapshot: RateLimitResetCreditSnapshot?
+    private var isFinished = false
+
+    func consume(_ data: Data) {
+        var lines: [Data] = []
+        lock.lock()
+        buffer.append(data)
+        while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+            lines.append(Data(buffer[..<newlineIndex]))
+            buffer.removeSubrange(...newlineIndex)
+        }
+        lock.unlock()
+
+        for line in lines where !line.isEmpty {
+            parse(line)
+        }
+    }
+
+    func finishWithoutResult() {
+        finish(with: nil)
+    }
+
+    func result() -> RateLimitResetCreditSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        return snapshot
+    }
+
+    private func parse(_ data: Data) {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (object["id"] as? NSNumber)?.intValue == 2 else {
+            return
+        }
+        guard let result = object["result"] as? [String: Any],
+              let summary = result["rateLimitResetCredits"] as? [String: Any],
+              let availableCount = (summary["availableCount"] as? NSNumber)?.intValue else {
+            finish(with: nil)
+            return
+        }
+
+        let credits = summary["credits"] as? [[String: Any]] ?? []
+        let expirationDates = credits.compactMap { credit -> Date? in
+            guard credit["status"] as? String == "available",
+                  let timestamp = credit["expiresAt"] as? NSNumber else {
+                return nil
+            }
+            return Date(timeIntervalSince1970: timestamp.doubleValue)
+        }.sorted()
+
+        finish(with: RateLimitResetCreditSnapshot(
+            availableCount: max(0, availableCount),
+            expirationDates: expirationDates
+        ))
+    }
+
+    private func finish(with snapshot: RateLimitResetCreditSnapshot?) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        self.snapshot = snapshot
+        isFinished = true
+        lock.unlock()
+        completed.signal()
     }
 }
 
@@ -712,8 +899,10 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func save() {
         store.automaticallySyncs = autoSyncButton.state == .on
-        store.manualResetCredits = resetCreditField.integerValue
-        store.manualResetExpirationDates = [firstResetExpiryPicker.dateValue, secondResetExpiryPicker.dateValue]
+        if !store.hasAutomaticallySyncedResetCredits {
+            store.manualResetCredits = resetCreditField.integerValue
+            store.manualResetExpirationDates = [firstResetExpiryPicker.dateValue, secondResetExpiryPicker.dateValue]
+        }
         if store.automaticallySyncs {
             _ = store.syncFromCodexSessions()
         } else {
@@ -769,7 +958,7 @@ final class SettingsWindowController: NSWindowController {
         resetCreditLabel.frame = NSRect(x: 20, y: 170, width: 112, height: 20)
         content.addSubview(resetCreditLabel)
 
-        resetCreditField.integerValue = store.manualResetCredits
+        resetCreditField.integerValue = store.effectiveResetCreditCount
         resetCreditField.alignment = .right
         resetCreditField.frame = NSRect(x: 174, y: 166, width: 42, height: 24)
         content.addSubview(resetCreditField)
@@ -777,7 +966,7 @@ final class SettingsWindowController: NSWindowController {
         resetCreditStepper.minValue = 0
         resetCreditStepper.maxValue = 99
         resetCreditStepper.increment = 1
-        resetCreditStepper.integerValue = store.manualResetCredits
+        resetCreditStepper.integerValue = store.effectiveResetCreditCount
         resetCreditStepper.target = self
         resetCreditStepper.action = #selector(resetCreditChanged)
         resetCreditStepper.frame = NSRect(x: 224, y: 166, width: 20, height: 24)
@@ -787,7 +976,7 @@ final class SettingsWindowController: NSWindowController {
         firstResetExpiryLabel.frame = NSRect(x: 20, y: 120, width: 96, height: 20)
         content.addSubview(firstResetExpiryLabel)
 
-        firstResetExpiryPicker.dateValue = store.manualResetExpirationDates.first ?? Date()
+        firstResetExpiryPicker.dateValue = store.effectiveResetExpirationDates.first ?? store.manualResetExpirationDates.first ?? Date()
         firstResetExpiryPicker.datePickerElements = [.yearMonthDay]
         firstResetExpiryPicker.datePickerStyle = .textFieldAndStepper
         firstResetExpiryPicker.frame = NSRect(x: 132, y: 116, width: 128, height: 24)
@@ -797,7 +986,7 @@ final class SettingsWindowController: NSWindowController {
         secondResetExpiryLabel.frame = NSRect(x: 20, y: 75, width: 96, height: 20)
         content.addSubview(secondResetExpiryLabel)
 
-        secondResetExpiryPicker.dateValue = store.manualResetExpirationDates.dropFirst().first ?? Date()
+        secondResetExpiryPicker.dateValue = store.effectiveResetExpirationDates.dropFirst().first ?? store.manualResetExpirationDates.dropFirst().first ?? Date()
         secondResetExpiryPicker.datePickerElements = [.yearMonthDay]
         secondResetExpiryPicker.datePickerStyle = .textFieldAndStepper
         secondResetExpiryPicker.frame = NSRect(x: 132, y: 71, width: 128, height: 24)
@@ -817,6 +1006,11 @@ final class SettingsWindowController: NSWindowController {
         percentField.isEnabled = allowsManualEntry
         stepper.isEnabled = allowsManualEntry
         datePicker.isEnabled = allowsManualEntry
+        let allowsManualResetEntry = autoSyncButton.state != .on || store.automaticResetCredits == nil
+        resetCreditField.isEnabled = allowsManualResetEntry
+        resetCreditStepper.isEnabled = allowsManualResetEntry
+        firstResetExpiryPicker.isEnabled = allowsManualResetEntry
+        secondResetExpiryPicker.isEnabled = allowsManualResetEntry
     }
 }
 
@@ -953,12 +1147,13 @@ final class GlassIconWidgetView: NSView {
     }
 
     private func resetCreditDetail() -> HoverDetail {
-        if store.manualResetCredits > 0 {
+        let availableCount = store.effectiveResetCreditCount
+        if availableCount > 0 {
             return HoverDetail(
                 title: "使用限额重置",
                 resetText: resetExpirationSummary(),
                 usedPercent: nil,
-                trailingText: String(format: "可用 %d 次", store.manualResetCredits)
+                trailingText: String(format: "可用 %d 次", availableCount)
             )
         }
         return HoverDetail(title: "使用限额重置", resetText: "额度会按时间窗自动恢复", usedPercent: nil, trailingText: "暂无可用")
@@ -968,7 +1163,10 @@ final class GlassIconWidgetView: NSView {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "M/d"
-        let dates = store.manualResetExpirationDates.prefix(store.manualResetCredits).map(formatter.string)
+        let dates = store.effectiveResetExpirationDates.prefix(store.effectiveResetCreditCount).map(formatter.string)
+        if dates.isEmpty, store.hasAutomaticallySyncedResetCredits {
+            return "已自动同步 · 到期时间未提供"
+        }
         return dates.isEmpty ? "Full reset（周 + 5 小时）" : "到期：" + dates.joined(separator: " · ")
     }
 }
@@ -1754,9 +1952,15 @@ private final class DoodleWidgetView: NSView {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "M/d"
-        let dates = store.manualResetExpirationDates.prefix(store.manualResetCredits).map(formatter.string)
-        let expiry = dates.isEmpty ? "到期时间待设置" : "到期：" + dates.joined(separator: " · ")
-        return HoverDetail(title: "使用限额重置", resetText: expiry, usedPercent: nil, trailingText: store.manualResetCredits > 0 ? String(format: "可用 %d 次", store.manualResetCredits) : "暂无可用")
+        let availableCount = store.effectiveResetCreditCount
+        let dates = store.effectiveResetExpirationDates.prefix(availableCount).map(formatter.string)
+        let expiry: String
+        if dates.isEmpty, store.hasAutomaticallySyncedResetCredits {
+            expiry = "已自动同步 · 到期时间未提供"
+        } else {
+            expiry = dates.isEmpty ? "到期时间待设置" : "到期：" + dates.joined(separator: " · ")
+        }
+        return HoverDetail(title: "使用限额重置", resetText: expiry, usedPercent: nil, trailingText: availableCount > 0 ? String(format: "可用 %d 次", availableCount) : "暂无可用")
     }
 }
 
