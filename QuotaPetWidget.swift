@@ -254,28 +254,28 @@ final class UsageStore {
         didSet {
             usedPercent = min(max(usedPercent, 0), 100)
             UserDefaults.standard.set(usedPercent, forKey: "usedPercent")
-            onChange?()
+            if !suppressesChangeNotification { onChange?() }
         }
     }
 
     var resetDate: Date {
         didSet {
             UserDefaults.standard.set(resetDate, forKey: "resetDate")
-            onChange?()
+            if !suppressesChangeNotification { onChange?() }
         }
     }
 
     var secondaryUsedPercent: Int? {
         didSet {
             UserDefaults.standard.set(secondaryUsedPercent, forKey: "secondaryUsedPercent")
-            onChange?()
+            if !suppressesChangeNotification { onChange?() }
         }
     }
 
     var secondaryResetDate: Date? {
         didSet {
             UserDefaults.standard.set(secondaryResetDate, forKey: "secondaryResetDate")
-            onChange?()
+            if !suppressesChangeNotification { onChange?() }
         }
     }
 
@@ -308,8 +308,11 @@ final class UsageStore {
     var onChange: (() -> Void)?
     private let codexReader = CodexRateLimitReader()
     private let resetCreditReader = CodexRateLimitResetReader()
+    private var isSyncingSessions = false
     private var isSyncingResetCredits = false
     private var lastResetCreditSyncAttempt = Date.distantPast
+    private var lastAppliedCodexSnapshotDate: Date
+    private var suppressesChangeNotification = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -321,6 +324,7 @@ final class UsageStore {
         manualResetCredits = defaults.object(forKey: "manualResetCredits") as? Int ?? 2
         manualResetExpirationDates = defaults.array(forKey: "manualResetExpirationDates") as? [Date] ?? UsageStore.defaultResetExpirationDates()
         automaticallySyncs = defaults.object(forKey: "automaticallySyncs") as? Bool ?? true
+        lastAppliedCodexSnapshotDate = defaults.object(forKey: "lastAppliedCodexSnapshotDate") as? Date ?? .distantPast
     }
 
     func setUsedPercent(_ value: Int) {
@@ -334,12 +338,54 @@ final class UsageStore {
     @discardableResult
     func syncFromCodexSessions() -> Bool {
         syncResetCreditsIfNeeded()
-        guard let snapshot = codexReader.latestSnapshot() else { return false }
-        usedPercent = snapshot.primaryUsedPercent
-        resetDate = snapshot.primaryResetDate
-        secondaryUsedPercent = snapshot.secondaryUsedPercent
-        secondaryResetDate = snapshot.secondaryResetDate
+        guard !isSyncingSessions else { return false }
+        isSyncingSessions = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let snapshot = self.codexReader.latestSnapshot()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isSyncingSessions = false
+                if let snapshot {
+                    self.applyCodexSnapshot(snapshot)
+                }
+            }
+        }
         return true
+    }
+
+    private func applyCodexSnapshot(_ snapshot: RateLimitSnapshot) {
+        guard snapshot.observedAt > lastAppliedCodexSnapshotDate else { return }
+
+        suppressesChangeNotification = true
+        defer {
+            suppressesChangeNotification = false
+            lastAppliedCodexSnapshotDate = snapshot.observedAt
+            UserDefaults.standard.set(snapshot.observedAt, forKey: "lastAppliedCodexSnapshotDate")
+            onChange?()
+        }
+
+        let hasPreviousSnapshot = lastAppliedCodexSnapshotDate != .distantPast
+        let primaryMovesBackward = hasPreviousSnapshot && snapshot.primaryResetDate < resetDate.addingTimeInterval(-60)
+        if !primaryMovesBackward {
+            let sameWindow = abs(snapshot.primaryResetDate.timeIntervalSince(resetDate)) < 60
+            usedPercent = sameWindow ? max(usedPercent, snapshot.primaryUsedPercent) : snapshot.primaryUsedPercent
+            resetDate = snapshot.primaryResetDate
+        }
+
+        if let incomingUsedPercent = snapshot.secondaryUsedPercent,
+           let incomingResetDate = snapshot.secondaryResetDate {
+            let secondaryMovesBackward = hasPreviousSnapshot && secondaryResetDate.map {
+                incomingResetDate < $0.addingTimeInterval(-60)
+            } ?? false
+            if !secondaryMovesBackward {
+                let sameWindow = secondaryResetDate.map {
+                    abs(incomingResetDate.timeIntervalSince($0)) < 60
+                } ?? false
+                secondaryUsedPercent = sameWindow ? max(secondaryUsedPercent ?? 0, incomingUsedPercent) : incomingUsedPercent
+                secondaryResetDate = incomingResetDate
+            }
+        }
     }
 
     var effectiveResetCreditCount: Int {
@@ -393,6 +439,7 @@ final class UsageStore {
 }
 
 private struct RateLimitSnapshot {
+    let observedAt: Date
     let primaryUsedPercent: Int
     let primaryResetDate: Date
     let secondaryUsedPercent: Int?
@@ -426,15 +473,19 @@ private final class CodexRateLimitReader {
             candidates.append((url, values.contentModificationDate ?? .distantPast))
         }
 
-        for candidate in candidates.sorted(by: { $0.modifiedAt > $1.modifiedAt }).prefix(8) {
-            if let snapshot = snapshot(from: candidate.url) {
-                return snapshot
+        return candidates
+            .sorted(by: { $0.modifiedAt > $1.modifiedAt })
+            .prefix(12)
+            .compactMap { snapshot(from: $0.url, fallbackDate: $0.modifiedAt) }
+            .max { lhs, rhs in
+                if lhs.observedAt == rhs.observedAt {
+                    return lhs.primaryUsedPercent < rhs.primaryUsedPercent
+                }
+                return lhs.observedAt < rhs.observedAt
             }
-        }
-        return nil
     }
 
-    private func snapshot(from url: URL) -> RateLimitSnapshot? {
+    private func snapshot(from url: URL, fallbackDate: Date) -> RateLimitSnapshot? {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attributes[.size] as? NSNumber,
               let handle = try? FileHandle(forReadingFrom: url) else {
@@ -458,6 +509,7 @@ private final class CodexRateLimitReader {
             }
             let secondary = limits["secondary"] as? [String: Any]
             return RateLimitSnapshot(
+                observedAt: eventDate(from: object) ?? fallbackDate,
                 primaryUsedPercent: percent,
                 primaryResetDate: Date(timeIntervalSince1970: TimeInterval(resetsAt)),
                 secondaryUsedPercent: integer(from: secondary?["used_percent"]),
@@ -465,6 +517,21 @@ private final class CodexRateLimitReader {
             )
         }
         return nil
+    }
+
+    private func eventDate(from value: Any) -> Date? {
+        guard let dictionary = value as? [String: Any],
+              let timestamp = dictionary["timestamp"] as? String else {
+            return nil
+        }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: timestamp) {
+            return date
+        }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: timestamp)
     }
 
     private func findRateLimits(in value: Any) -> [String: Any]? {
@@ -686,7 +753,7 @@ final class WidgetContentView: NSView {
         syncCodexUsage()
         refresh()
         timer = Timer.scheduledTimer(timeInterval: 30, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
-        syncTimer = Timer.scheduledTimer(timeInterval: 5, target: self, selector: #selector(syncCodexUsage), userInfo: nil, repeats: true)
+        syncTimer = Timer.scheduledTimer(timeInterval: 2, target: self, selector: #selector(syncCodexUsage), userInfo: nil, repeats: true)
     }
 
     required init?(coder: NSCoder) {
@@ -1067,7 +1134,7 @@ final class GlassIconWidgetView: NSView {
         syncCodexUsage()
         refresh()
         clockTimer = Timer.scheduledTimer(timeInterval: 30, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
-        syncTimer = Timer.scheduledTimer(timeInterval: 5, target: self, selector: #selector(syncCodexUsage), userInfo: nil, repeats: true)
+        syncTimer = Timer.scheduledTimer(timeInterval: 2, target: self, selector: #selector(syncCodexUsage), userInfo: nil, repeats: true)
     }
 
     required init?(coder: NSCoder) {
@@ -1830,7 +1897,7 @@ private final class DoodleWidgetView: NSView {
         store.onChange = { [weak self] in self?.refresh() }
         syncCodexUsage()
         clockTimer = Timer.scheduledTimer(timeInterval: 30, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
-        syncTimer = Timer.scheduledTimer(timeInterval: 5, target: self, selector: #selector(syncCodexUsage), userInfo: nil, repeats: true)
+        syncTimer = Timer.scheduledTimer(timeInterval: 2, target: self, selector: #selector(syncCodexUsage), userInfo: nil, repeats: true)
     }
 
     required init?(coder: NSCoder) { nil }

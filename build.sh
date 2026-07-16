@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT="${0:A:h}"
-MODULE_CACHE="$ROOT/.module-cache"
 OUTPUTS="$ROOT/dist"
 STYLE="${1:-doodle}"
+MODULE_CACHE="$ROOT/.module-cache/$STYLE"
 
 case "$STYLE" in
   doodle)
