@@ -309,7 +309,9 @@ final class UsageStore {
     private let codexReader = CodexRateLimitReader()
     private let resetCreditReader = CodexRateLimitResetReader()
     private var isSyncingSessions = false
+    private var queuedForcedSessionSync = false
     private var isSyncingResetCredits = false
+    private var queuedForcedResetCreditSync = false
     private var lastResetCreditSyncAttempt = Date.distantPast
     private var lastAppliedCodexSnapshotDate: Date
     private var suppressesChangeNotification = false
@@ -336,9 +338,12 @@ final class UsageStore {
     }
 
     @discardableResult
-    func syncFromCodexSessions() -> Bool {
-        syncResetCreditsIfNeeded()
-        guard !isSyncingSessions else { return false }
+    func syncFromCodexSessions(force: Bool = false) -> Bool {
+        syncResetCreditsIfNeeded(force: force)
+        guard !isSyncingSessions else {
+            if force { queuedForcedSessionSync = true }
+            return false
+        }
         isSyncingSessions = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
@@ -348,6 +353,10 @@ final class UsageStore {
                 self.isSyncingSessions = false
                 if let snapshot {
                     self.applyCodexSnapshot(snapshot)
+                }
+                if self.queuedForcedSessionSync {
+                    self.queuedForcedSessionSync = false
+                    _ = self.syncFromCodexSessions(force: true)
                 }
             }
         }
@@ -406,10 +415,13 @@ final class UsageStore {
         automaticallySyncs && automaticResetCredits != nil
     }
 
-    private func syncResetCreditsIfNeeded() {
+    private func syncResetCreditsIfNeeded(force: Bool = false) {
         let now = Date()
-        guard !isSyncingResetCredits,
-              now.timeIntervalSince(lastResetCreditSyncAttempt) >= 60 else {
+        guard !isSyncingResetCredits else {
+            if force { queuedForcedResetCreditSync = true }
+            return
+        }
+        guard force || now.timeIntervalSince(lastResetCreditSyncAttempt) >= 60 else {
             return
         }
 
@@ -423,6 +435,10 @@ final class UsageStore {
                 self.isSyncingResetCredits = false
                 if let snapshot {
                     self.automaticResetCredits = snapshot
+                }
+                if self.queuedForcedResetCreditSync {
+                    self.queuedForcedResetCreditSync = false
+                    self.syncResetCreditsIfNeeded(force: true)
                 }
             }
         }
@@ -1112,21 +1128,33 @@ final class GlassIconWidgetView: NSView {
         let stack = GlassStackBackground(frame: NSRect(x: 10, y: 8, width: 88, height: 294))
         addSubview(stack)
 
-        let hourlyIcon = GlassQuotaIconView(kind: .hourly, hoverChanged: { [weak self] kind, isHovering in
-            self?.updateHover(kind: kind, isHovering: isHovering)
-        })
+        let hourlyIcon = GlassQuotaIconView(
+            kind: .hourly,
+            hoverChanged: { [weak self] kind, isHovering in
+                self?.updateHover(kind: kind, isHovering: isHovering)
+            },
+            clicked: { [weak self] in self?.requestManualRefresh() }
+        )
         hourlyIcon.frame = NSRect(x: 6, y: 22, width: 96, height: 84)
         addSubview(hourlyIcon)
 
-        let weeklyIcon = GlassQuotaIconView(kind: .weekly, hoverChanged: { [weak self] kind, isHovering in
-            self?.updateHover(kind: kind, isHovering: isHovering)
-        })
+        let weeklyIcon = GlassQuotaIconView(
+            kind: .weekly,
+            hoverChanged: { [weak self] kind, isHovering in
+                self?.updateHover(kind: kind, isHovering: isHovering)
+            },
+            clicked: { [weak self] in self?.requestManualRefresh() }
+        )
         weeklyIcon.frame = NSRect(x: 6, y: 113, width: 96, height: 84)
         addSubview(weeklyIcon)
 
-        let resetIcon = GlassQuotaIconView(kind: .reset, hoverChanged: { [weak self] kind, isHovering in
-            self?.updateHover(kind: kind, isHovering: isHovering)
-        })
+        let resetIcon = GlassQuotaIconView(
+            kind: .reset,
+            hoverChanged: { [weak self] kind, isHovering in
+                self?.updateHover(kind: kind, isHovering: isHovering)
+            },
+            clicked: { [weak self] in self?.requestManualRefresh() }
+        )
         resetIcon.frame = NSRect(x: 6, y: 204, width: 96, height: 84)
         addSubview(resetIcon)
 
@@ -1155,6 +1183,11 @@ final class GlassIconWidgetView: NSView {
     @objc private func syncCodexUsage() {
         guard store.automaticallySyncs else { return }
         _ = store.syncFromCodexSessions()
+    }
+
+    private func requestManualRefresh() {
+        guard store.automaticallySyncs else { return }
+        _ = store.syncFromCodexSessions(force: true)
     }
 
     private func updateHover(kind: QuotaDetailKind, isHovering: Bool) {
@@ -1276,17 +1309,26 @@ private final class GlassStackBackground: NSView {
 private final class GlassQuotaIconView: NSView {
     private let kind: QuotaDetailKind
     private let hoverChanged: (QuotaDetailKind, Bool) -> Void
+    private let clicked: () -> Void
     private let imageView = NSImageView()
     private var trackingArea: NSTrackingArea?
     private var isHovering = false {
         didSet { updateHoverAppearance() }
     }
+    private var isPressed = false {
+        didSet { updateHoverAppearance() }
+    }
 
     override var isFlipped: Bool { true }
 
-    init(kind: QuotaDetailKind, hoverChanged: @escaping (QuotaDetailKind, Bool) -> Void) {
+    init(
+        kind: QuotaDetailKind,
+        hoverChanged: @escaping (QuotaDetailKind, Bool) -> Void,
+        clicked: @escaping () -> Void
+    ) {
         self.kind = kind
         self.hoverChanged = hoverChanged
+        self.clicked = clicked
         super.init(frame: .zero)
         wantsLayer = true
         let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 25, weight: .semibold)
@@ -1296,12 +1338,20 @@ private final class GlassQuotaIconView: NSView {
         imageView.contentTintColor = NSColor(srgbRed: 0.12, green: 0.12, blue: 0.14, alpha: 1)
         imageView.imageScaling = .scaleProportionallyDown
         imageView.frame = symbolFrame(hovering: false)
+        imageView.wantsLayer = true
         addSubview(imageView)
-        toolTip = accessibilityTitle
+        toolTip = accessibilityTitle + "，点击立即刷新"
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(accessibilityTitle + "，点击立即刷新")
     }
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
     }
 
     override func updateTrackingAreas() {
@@ -1324,10 +1374,29 @@ private final class GlassQuotaIconView: NSView {
         hoverChanged(kind, false)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        isPressed = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let isInside = bounds.contains(convert(event.locationInWindow, from: nil))
+        isPressed = false
+        guard isInside else { return }
+        performRefreshAnimation()
+        clicked()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        performRefreshAnimation()
+        clicked()
+        return true
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let base = orbFrame(hovering: isHovering)
-        if isHovering {
+        let isActive = isHovering || isPressed
+        let base = orbFrame(hovering: isActive)
+        if isActive {
             for index in stride(from: 3, through: 1, by: -1) {
                 let ripple = base.offsetBy(dx: CGFloat(-index * 4), dy: CGFloat(index * 4))
                 NSColor.white.withAlphaComponent(0.30 + CGFloat(index) * 0.12).setFill()
@@ -1353,12 +1422,22 @@ private final class GlassQuotaIconView: NSView {
     }
 
     private func updateHoverAppearance() {
+        let isActive = isHovering || isPressed
         needsDisplay = true
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.24
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            imageView.animator().frame = symbolFrame(hovering: isHovering)
+            imageView.animator().frame = symbolFrame(hovering: isActive)
         }
+    }
+
+    private func performRefreshAnimation() {
+        let animation = CAKeyframeAnimation(keyPath: "transform.scale")
+        animation.values = [1, 0.78, 1.14, 1]
+        animation.keyTimes = [0, 0.22, 0.62, 1]
+        animation.duration = 0.42
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        imageView.layer?.add(animation, forKey: "manualRefreshPulse")
     }
 
     private func orbFrame(hovering: Bool) -> NSRect {
@@ -1582,30 +1661,46 @@ private final class DoodleIconButton: NSView {
     private let kind: QuotaDetailKind
     private let accent: NSColor
     private let hoverChanged: (QuotaDetailKind, Bool) -> Void
+    private let clicked: () -> Void
     private let imageView = NSImageView()
     private var trackingArea: NSTrackingArea?
     private var isHovering = false {
         didSet { updateHoverAppearance() }
     }
+    private var isPressed = false {
+        didSet { updateHoverAppearance() }
+    }
 
     override var isFlipped: Bool { true }
 
-    init(kind: QuotaDetailKind, accent: NSColor, hoverChanged: @escaping (QuotaDetailKind, Bool) -> Void) {
+    init(
+        kind: QuotaDetailKind,
+        accent: NSColor,
+        hoverChanged: @escaping (QuotaDetailKind, Bool) -> Void,
+        clicked: @escaping () -> Void
+    ) {
         self.kind = kind
         self.accent = accent
         self.hoverChanged = hoverChanged
+        self.clicked = clicked
         super.init(frame: .zero)
         imageView.image = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 19 * DoodleMetrics.scale, weight: .bold))
         imageView.contentTintColor = DoodlePalette.ink
         imageView.imageScaling = .scaleProportionallyDown
         imageView.frame = iconFrame(hovered: false)
+        imageView.wantsLayer = true
         addSubview(imageView)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel(title)
+        setAccessibilityLabel(title + "，点击立即刷新")
+        toolTip = title + "，点击立即刷新"
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
 
     override func updateTrackingAreas() {
         if let trackingArea { removeTrackingArea(trackingArea) }
@@ -1631,19 +1726,38 @@ private final class DoodleIconButton: NSView {
         hoverChanged(kind, true)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        isPressed = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let isInside = bounds.contains(convert(event.locationInWindow, from: nil))
+        isPressed = false
+        guard isInside else { return }
+        performRefreshAnimation()
+        clicked()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        performRefreshAnimation()
+        clicked()
+        return true
+    }
+
     func refreshHoverTracking() {
         updateTrackingAreas()
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let rect = buttonFrame(hovered: isHovering)
+        let isActive = isHovering || isPressed
+        let rect = buttonFrame(hovered: isActive)
         let shadow = NSShadow()
         shadow.shadowColor = DoodlePalette.ink
         shadow.shadowBlurRadius = 0
         shadow.shadowOffset = NSSize(width: 2.5 * DoodleMetrics.scale, height: -2.5 * DoodleMetrics.scale)
         shadow.set()
         let path = NSBezierPath(ovalIn: rect)
-        (isHovering ? accent : .white).setFill()
+        (isActive ? accent : .white).setFill()
         path.fill()
         DoodlePalette.ink.setStroke()
         path.lineWidth = 2.5 * DoodleMetrics.scale
@@ -1651,12 +1765,22 @@ private final class DoodleIconButton: NSView {
     }
 
     private func updateHoverAppearance() {
+        let isActive = isHovering || isPressed
         needsDisplay = true
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.18
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            imageView.animator().frame = iconFrame(hovered: isHovering)
+            imageView.animator().frame = iconFrame(hovered: isActive)
         }
+    }
+
+    private func performRefreshAnimation() {
+        let animation = CAKeyframeAnimation(keyPath: "transform.scale")
+        animation.values = [1, 0.76, 1.16, 1]
+        animation.keyTimes = [0, 0.22, 0.62, 1]
+        animation.duration = 0.42
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        imageView.layer?.add(animation, forKey: "manualRefreshPulse")
     }
 
     private func buttonFrame(hovered: Bool) -> NSRect {
@@ -1875,21 +1999,36 @@ private final class DoodleWidgetView: NSView {
         expandButton.frame = NSRect(x: 105 * DoodleMetrics.scale, y: 0, width: 70 * DoodleMetrics.scale, height: 18 * DoodleMetrics.scale)
         addSubview(expandButton)
 
-        let hourly = DoodleIconButton(kind: .hourly, accent: DoodlePalette.lavender) { [weak self] kind, hovering in
-            self?.updateHover(kind: kind, isHovering: hovering)
-        }
+        let hourly = DoodleIconButton(
+            kind: .hourly,
+            accent: DoodlePalette.lavender,
+            hoverChanged: { [weak self] kind, hovering in
+                self?.updateHover(kind: kind, isHovering: hovering)
+            },
+            clicked: { [weak self] in self?.requestManualRefresh() }
+        )
         hourly.frame = NSRect(x: 42 * DoodleMetrics.scale, y: 48 * DoodleMetrics.scale, width: 58 * DoodleMetrics.scale, height: 54 * DoodleMetrics.scale)
         addSubview(hourly)
 
-        let weekly = DoodleIconButton(kind: .weekly, accent: DoodlePalette.coral) { [weak self] kind, hovering in
-            self?.updateHover(kind: kind, isHovering: hovering)
-        }
+        let weekly = DoodleIconButton(
+            kind: .weekly,
+            accent: DoodlePalette.coral,
+            hoverChanged: { [weak self] kind, hovering in
+                self?.updateHover(kind: kind, isHovering: hovering)
+            },
+            clicked: { [weak self] in self?.requestManualRefresh() }
+        )
         weekly.frame = NSRect(x: 111 * DoodleMetrics.scale, y: 48 * DoodleMetrics.scale, width: 58 * DoodleMetrics.scale, height: 54 * DoodleMetrics.scale)
         addSubview(weekly)
 
-        let reset = DoodleIconButton(kind: .reset, accent: DoodlePalette.mint) { [weak self] kind, hovering in
-            self?.updateHover(kind: kind, isHovering: hovering)
-        }
+        let reset = DoodleIconButton(
+            kind: .reset,
+            accent: DoodlePalette.mint,
+            hoverChanged: { [weak self] kind, hovering in
+                self?.updateHover(kind: kind, isHovering: hovering)
+            },
+            clicked: { [weak self] in self?.requestManualRefresh() }
+        )
         reset.frame = NSRect(x: 180 * DoodleMetrics.scale, y: 48 * DoodleMetrics.scale, width: 58 * DoodleMetrics.scale, height: 54 * DoodleMetrics.scale)
         addSubview(reset)
         iconButtons = [hourly, weekly, reset]
@@ -1930,6 +2069,11 @@ private final class DoodleWidgetView: NSView {
     @objc private func syncCodexUsage() {
         guard store.automaticallySyncs else { return }
         _ = store.syncFromCodexSessions()
+    }
+
+    private func requestManualRefresh() {
+        guard store.automaticallySyncs else { return }
+        _ = store.syncFromCodexSessions(force: true)
     }
 
     private func updateHover(kind: QuotaDetailKind, isHovering: Bool) {

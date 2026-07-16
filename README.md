@@ -11,6 +11,7 @@ A lightweight macOS floating widget for viewing locally available Codex quota in
 - Reads the locally available hourly and weekly quota windows from Codex session JSONL files.
 - Includes a compact hand-drawn note style and a classic glass style.
 - Shows reset time, remaining quota, and automatically refreshed usage-limit reset credits.
+- Click any quota icon to force an immediate refresh, including while a background refresh is already running.
 - Keeps authentication inside the installed Codex CLI; the widget does not read credentials or send telemetry.
 - Runs as a floating macOS accessory app with a menu-bar menu for settings and exit.
 
