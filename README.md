@@ -8,18 +8,18 @@ A lightweight macOS floating widget for viewing locally available Codex quota in
 
 ## Features
 
-- Reads the locally available hourly and weekly quota windows from Codex session JSONL files.
+- Reads hourly and weekly quota windows from the same OpenAI usage service used by Codex, with the local Codex RPC and session JSONL files as fallbacks.
 - Includes a compact hand-drawn note style and a classic glass style.
 - Shows reset time, remaining quota, and automatically refreshed usage-limit reset credits.
 - Click any quota icon to force an immediate refresh, including while a background refresh is already running.
-- Keeps authentication inside the installed Codex CLI; the widget does not read credentials or send telemetry.
+- Uses the existing local Codex sign-in only for quota requests and does not send telemetry.
 - Runs as a floating macOS accessory app with a menu-bar menu for settings and exit.
 
 ## Privacy and Data
 
-The widget reads `~/.codex/sessions/**/*.jsonl` on the same Mac to obtain locally recorded quota-window data. Those files are never uploaded by this project.
+When automatic sync is enabled, the widget reads the access token from `~/.codex/auth.json` and sends it only to `https://chatgpt.com/backend-api/wham/usage` over HTTPS. The token is kept in memory for the request and is never logged, copied, or stored by the widget.
 
-When automatic sync is enabled, the widget asks the locally installed Codex CLI for `account/rateLimits/read` once per minute. This provides the usage-limit reset count and available expiration dates without reading or storing account credentials. If the CLI or endpoint is unavailable, the reset count and dates configured in the widget's Settings window remain as the fallback.
+If the OpenAI usage request fails, the widget asks the locally installed Codex CLI for `account/rateLimits/read`. It also reads `~/.codex/sessions/**/*.jsonl` on the same Mac only as a final fallback for locally recorded quota-window data. Session files are never uploaded by this project. Windows are identified by their reported duration instead of their `primary` or `secondary` position, and a missing 5-hour window is shown as waiting rather than being replaced with the weekly value.
 
 Do not commit your local Codex session files, screenshots containing account information, or built application archives.
 
@@ -67,7 +67,7 @@ The build script applies a local ad-hoc signature, but the app is not notarized 
 
 ## Limitations
 
-This project reads locally recorded Codex session data rather than an official public quota API. The underlying session format can change, so parsing may need maintenance in the future.
+The OpenAI usage endpoint and local Codex data formats are not documented as stable public integration APIs. They can change, so parsing may need maintenance in the future. If the service does not return a 5-hour window for the current account, the widget cannot reconstruct that value and will show it as waiting for sync.
 
 ## Contributing
 

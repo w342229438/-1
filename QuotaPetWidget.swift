@@ -307,13 +307,15 @@ final class UsageStore {
 
     var onChange: (() -> Void)?
     private let codexReader = CodexRateLimitReader()
-    private let resetCreditReader = CodexRateLimitResetReader()
-    private var isSyncingSessions = false
-    private var queuedForcedSessionSync = false
-    private var isSyncingResetCredits = false
-    private var queuedForcedResetCreditSync = false
-    private var lastResetCreditSyncAttempt = Date.distantPast
-    private var lastAppliedCodexSnapshotDate: Date
+    private let webUsageReader = CodexWebUsageReader()
+    private let accountReader = CodexAccountSnapshotReader()
+    private var isSyncingAccount = false
+    private var queuedForcedAccountSync = false
+    private var lastAccountSyncAttempt = Date.distantPast
+    private var lastAppliedHourlySnapshotDate: Date
+    private var lastAppliedWeeklySnapshotDate: Date
+    private var accountReportsHourlyLimit: Bool?
+    private var accountReportsWeeklyLimit: Bool?
     private var suppressesChangeNotification = false
 
     init() {
@@ -326,7 +328,8 @@ final class UsageStore {
         manualResetCredits = defaults.object(forKey: "manualResetCredits") as? Int ?? 2
         manualResetExpirationDates = defaults.array(forKey: "manualResetExpirationDates") as? [Date] ?? UsageStore.defaultResetExpirationDates()
         automaticallySyncs = defaults.object(forKey: "automaticallySyncs") as? Bool ?? true
-        lastAppliedCodexSnapshotDate = defaults.object(forKey: "lastAppliedCodexSnapshotDate") as? Date ?? .distantPast
+        lastAppliedHourlySnapshotDate = defaults.object(forKey: "lastAppliedHourlySnapshotDate") as? Date ?? .distantPast
+        lastAppliedWeeklySnapshotDate = defaults.object(forKey: "lastAppliedWeeklySnapshotDate") as? Date ?? .distantPast
     }
 
     func setUsedPercent(_ value: Int) {
@@ -339,62 +342,47 @@ final class UsageStore {
 
     @discardableResult
     func syncFromCodexSessions(force: Bool = false) -> Bool {
-        syncResetCreditsIfNeeded(force: force)
-        guard !isSyncingSessions else {
-            if force { queuedForcedSessionSync = true }
-            return false
-        }
-        isSyncingSessions = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            let snapshot = self.codexReader.latestSnapshot()
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.isSyncingSessions = false
-                if let snapshot {
-                    self.applyCodexSnapshot(snapshot)
-                }
-                if self.queuedForcedSessionSync {
-                    self.queuedForcedSessionSync = false
-                    _ = self.syncFromCodexSessions(force: true)
-                }
-            }
-        }
-        return true
+        syncAccountSnapshotIfNeeded(force: force)
     }
 
     private func applyCodexSnapshot(_ snapshot: RateLimitSnapshot) {
-        guard snapshot.observedAt > lastAppliedCodexSnapshotDate else { return }
+        let appliesHourly = snapshot.hourly != nil && snapshot.observedAt > lastAppliedHourlySnapshotDate
+        let appliesWeekly = snapshot.weekly != nil && snapshot.observedAt > lastAppliedWeeklySnapshotDate
+        guard appliesHourly || appliesWeekly else { return }
 
         suppressesChangeNotification = true
         defer {
             suppressesChangeNotification = false
-            lastAppliedCodexSnapshotDate = snapshot.observedAt
-            UserDefaults.standard.set(snapshot.observedAt, forKey: "lastAppliedCodexSnapshotDate")
             onChange?()
         }
 
-        let hasPreviousSnapshot = lastAppliedCodexSnapshotDate != .distantPast
-        let primaryMovesBackward = hasPreviousSnapshot && snapshot.primaryResetDate < resetDate.addingTimeInterval(-60)
-        if !primaryMovesBackward {
-            let sameWindow = abs(snapshot.primaryResetDate.timeIntervalSince(resetDate)) < 60
-            usedPercent = sameWindow ? max(usedPercent, snapshot.primaryUsedPercent) : snapshot.primaryUsedPercent
-            resetDate = snapshot.primaryResetDate
+        if appliesHourly, let hourly = snapshot.hourly {
+            usedPercent = hourly.usedPercent
+            resetDate = hourly.resetDate
+            lastAppliedHourlySnapshotDate = snapshot.observedAt
+            UserDefaults.standard.set(snapshot.observedAt, forKey: "lastAppliedHourlySnapshotDate")
         }
 
-        if let incomingUsedPercent = snapshot.secondaryUsedPercent,
-           let incomingResetDate = snapshot.secondaryResetDate {
-            let secondaryMovesBackward = hasPreviousSnapshot && secondaryResetDate.map {
-                incomingResetDate < $0.addingTimeInterval(-60)
-            } ?? false
-            if !secondaryMovesBackward {
-                let sameWindow = secondaryResetDate.map {
-                    abs(incomingResetDate.timeIntervalSince($0)) < 60
-                } ?? false
-                secondaryUsedPercent = sameWindow ? max(secondaryUsedPercent ?? 0, incomingUsedPercent) : incomingUsedPercent
-                secondaryResetDate = incomingResetDate
-            }
+        if appliesWeekly, let weekly = snapshot.weekly {
+            secondaryUsedPercent = weekly.usedPercent
+            secondaryResetDate = weekly.resetDate
+            lastAppliedWeeklySnapshotDate = snapshot.observedAt
+            UserDefaults.standard.set(snapshot.observedAt, forKey: "lastAppliedWeeklySnapshotDate")
         }
+    }
+
+    var hasCurrentHourlyLimit: Bool {
+        guard automaticallySyncs else { return true }
+        guard accountReportsHourlyLimit != false else { return false }
+        let interval = resetDate.timeIntervalSinceNow
+        return interval > -60 && interval <= 6 * 3_600
+    }
+
+    var hasCurrentWeeklyLimit: Bool {
+        guard accountReportsWeeklyLimit != false else { return false }
+        guard secondaryUsedPercent != nil, let secondaryResetDate else { return false }
+        let interval = secondaryResetDate.timeIntervalSinceNow
+        return interval > -60 && interval <= 8 * 86_400
     }
 
     var effectiveResetCreditCount: Int {
@@ -415,33 +403,58 @@ final class UsageStore {
         automaticallySyncs && automaticResetCredits != nil
     }
 
-    private func syncResetCreditsIfNeeded(force: Bool = false) {
+    @discardableResult
+    private func syncAccountSnapshotIfNeeded(force: Bool = false) -> Bool {
         let now = Date()
-        guard !isSyncingResetCredits else {
-            if force { queuedForcedResetCreditSync = true }
-            return
+        guard !isSyncingAccount else {
+            if force { queuedForcedAccountSync = true }
+            return false
         }
-        guard force || now.timeIntervalSince(lastResetCreditSyncAttempt) >= 60 else {
-            return
+        guard force || now.timeIntervalSince(lastAccountSyncAttempt) >= 15 else {
+            return false
         }
 
-        isSyncingResetCredits = true
-        lastResetCreditSyncAttempt = now
+        isSyncingAccount = true
+        lastAccountSyncAttempt = now
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let snapshot = self.resetCreditReader.latestSnapshot()
+            let accountSnapshot = self.webUsageReader.latestSnapshot() ?? self.accountReader.latestSnapshot()
+            let sessionSnapshot = accountSnapshot?.rateLimitsAreAuthoritative == true
+                ? nil
+                : self.codexReader.latestSnapshot()
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.isSyncingResetCredits = false
-                if let snapshot {
-                    self.automaticResetCredits = snapshot
+                self.isSyncingAccount = false
+                if let snapshot = accountSnapshot {
+                    if snapshot.rateLimitsAreAuthoritative {
+                        let reportsHourly = snapshot.rateLimits?.hourly != nil
+                        let reportsWeekly = snapshot.rateLimits?.weekly != nil
+                        let availabilityChanged = self.accountReportsHourlyLimit != reportsHourly
+                            || self.accountReportsWeeklyLimit != reportsWeekly
+                        self.accountReportsHourlyLimit = reportsHourly
+                        self.accountReportsWeeklyLimit = reportsWeekly
+                        if availabilityChanged {
+                            self.onChange?()
+                        }
+                    }
+                    if let rateLimits = snapshot.rateLimits {
+                        self.applyCodexSnapshot(rateLimits)
+                    }
+                    if let resetCredits = snapshot.resetCredits {
+                        self.automaticResetCredits = resetCredits
+                    }
                 }
-                if self.queuedForcedResetCreditSync {
-                    self.queuedForcedResetCreditSync = false
-                    self.syncResetCreditsIfNeeded(force: true)
+                if accountSnapshot?.rateLimitsAreAuthoritative != true,
+                   let sessionSnapshot {
+                    self.applyCodexSnapshot(sessionSnapshot)
+                }
+                if self.queuedForcedAccountSync {
+                    self.queuedForcedAccountSync = false
+                    self.syncAccountSnapshotIfNeeded(force: true)
                 }
             }
         }
+        return true
     }
 
     private static func defaultResetExpirationDates() -> [Date] {
@@ -454,17 +467,95 @@ final class UsageStore {
     }
 }
 
+private struct RateLimitWindowSnapshot {
+    let usedPercent: Int
+    let resetDate: Date
+}
+
 private struct RateLimitSnapshot {
     let observedAt: Date
-    let primaryUsedPercent: Int
-    let primaryResetDate: Date
-    let secondaryUsedPercent: Int?
-    let secondaryResetDate: Date?
+    let hourly: RateLimitWindowSnapshot?
+    let weekly: RateLimitWindowSnapshot?
 }
 
 struct RateLimitResetCreditSnapshot {
     let availableCount: Int
     let expirationDates: [Date]
+}
+
+private struct CodexAccountSnapshot {
+    let rateLimits: RateLimitSnapshot?
+    let resetCredits: RateLimitResetCreditSnapshot?
+    let rateLimitsAreAuthoritative: Bool
+}
+
+private func rateLimitSnapshot(from limits: [String: Any], observedAt: Date) -> RateLimitSnapshot? {
+    var hourly: RateLimitWindowSnapshot?
+    var weekly: RateLimitWindowSnapshot?
+
+    let windows: [(position: String, value: Any?)] = [
+        ("primary", limits["primary"] ?? limits["primary_window"] ?? limits["primaryWindow"]),
+        ("secondary", limits["secondary"] ?? limits["secondary_window"] ?? limits["secondaryWindow"])
+    ]
+    for (position, value) in windows {
+        guard let window = value as? [String: Any] else {
+            continue
+        }
+
+        let usedPercent = integerValue(in: window, keys: ["usedPercent", "used_percent"])
+            ?? integerValue(in: window, keys: ["remainingPercent", "remaining_percent"]).map { 100 - $0 }
+        guard let usedPercent,
+              let resetDate = resetDate(in: window, observedAt: observedAt) else {
+            continue
+        }
+
+        let snapshot = RateLimitWindowSnapshot(
+            usedPercent: min(max(usedPercent, 0), 100),
+            resetDate: resetDate
+        )
+        let durationMinutes = integerValue(in: window, keys: ["windowDurationMins", "window_minutes"])
+        let durationSeconds = integerValue(in: window, keys: ["limitWindowSeconds", "limit_window_seconds"])
+        switch (durationMinutes, durationSeconds) {
+        case (300, _), (_, 18_000):
+            hourly = snapshot
+        case (10_080, _), (_, 604_800):
+            weekly = snapshot
+        case (nil, nil):
+            if position == "primary" {
+                hourly = snapshot
+            } else {
+                weekly = snapshot
+            }
+        default:
+            continue
+        }
+    }
+
+    guard hourly != nil || weekly != nil else { return nil }
+    return RateLimitSnapshot(observedAt: observedAt, hourly: hourly, weekly: weekly)
+}
+
+private func resetDate(in window: [String: Any], observedAt: Date) -> Date? {
+    if let timestamp = integerValue(in: window, keys: ["resetsAt", "resets_at", "resetAt", "reset_at"]) {
+        let rawTimestamp = TimeInterval(timestamp)
+        let normalizedTimestamp = rawTimestamp > 10_000_000_000 ? rawTimestamp / 1_000 : rawTimestamp
+        return Date(timeIntervalSince1970: normalizedTimestamp)
+    }
+    if let seconds = integerValue(
+        in: window,
+        keys: ["resetAfterSeconds", "reset_after_seconds", "secondsUntilReset", "seconds_until_reset"]
+    ) {
+        return observedAt.addingTimeInterval(TimeInterval(max(0, seconds)))
+    }
+    return nil
+}
+
+private func integerValue(in dictionary: [String: Any], keys: [String]) -> Int? {
+    for key in keys {
+        if let number = dictionary[key] as? NSNumber { return number.intValue }
+        if let number = dictionary[key] as? Int { return number }
+    }
+    return nil
 }
 
 private final class CodexRateLimitReader {
@@ -493,12 +584,7 @@ private final class CodexRateLimitReader {
             .sorted(by: { $0.modifiedAt > $1.modifiedAt })
             .prefix(12)
             .compactMap { snapshot(from: $0.url, fallbackDate: $0.modifiedAt) }
-            .max { lhs, rhs in
-                if lhs.observedAt == rhs.observedAt {
-                    return lhs.primaryUsedPercent < rhs.primaryUsedPercent
-                }
-                return lhs.observedAt < rhs.observedAt
-            }
+            .max { $0.observedAt < $1.observedAt }
     }
 
     private func snapshot(from url: URL, fallbackDate: Date) -> RateLimitSnapshot? {
@@ -518,19 +604,13 @@ private final class CodexRateLimitReader {
         for line in text.split(separator: "\n").reversed() {
             guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
                   let limits = findRateLimits(in: object),
-                  let primary = limits["primary"] as? [String: Any],
-                  let percent = integer(from: primary["used_percent"]),
-                  let resetsAt = integer(from: primary["resets_at"]) else {
+                  let snapshot = rateLimitSnapshot(
+                      from: limits,
+                      observedAt: eventDate(from: object) ?? fallbackDate
+                  ) else {
                 continue
             }
-            let secondary = limits["secondary"] as? [String: Any]
-            return RateLimitSnapshot(
-                observedAt: eventDate(from: object) ?? fallbackDate,
-                primaryUsedPercent: percent,
-                primaryResetDate: Date(timeIntervalSince1970: TimeInterval(resetsAt)),
-                secondaryUsedPercent: integer(from: secondary?["used_percent"]),
-                secondaryResetDate: integer(from: secondary?["resets_at"]).map { Date(timeIntervalSince1970: TimeInterval($0)) }
-            )
+            return snapshot
         }
         return nil
     }
@@ -570,16 +650,144 @@ private final class CodexRateLimitReader {
         return nil
     }
 
-    private func integer(from value: Any?) -> Int? {
-        if let number = value as? NSNumber { return number.intValue }
-        if let number = value as? Int { return number }
+}
+
+private final class CodexWebUsageReader {
+    private let endpoint = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+
+    func latestSnapshot() -> CodexAccountSnapshot? {
+        guard let accessToken = accessToken() else { return nil }
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 12
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("codex-quota-widget/1.0", forHTTPHeaderField: "User-Agent")
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 15
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: configuration)
+        let responseBox = CodexWebUsageResponseBox()
+        let completed = DispatchSemaphore(value: 0)
+        let task = session.dataTask(with: request) { data, response, _ in
+            responseBox.store(
+                data: data,
+                statusCode: (response as? HTTPURLResponse)?.statusCode
+            )
+            completed.signal()
+        }
+        task.resume()
+
+        guard completed.wait(timeout: .now() + 16) == .success else {
+            session.invalidateAndCancel()
+            return nil
+        }
+        session.finishTasksAndInvalidate()
+
+        let response = responseBox.value()
+        guard response.statusCode == 200,
+              let data = response.data,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        let limitPayload = (root["rate_limit"] as? [String: Any])
+            ?? (root["rateLimits"] as? [String: Any])
+            ?? (root["rate_limits"] as? [String: Any])
+        let observedAt = Date()
+        let rateLimits = limitPayload.flatMap {
+            rateLimitSnapshot(from: $0, observedAt: observedAt)
+        }
+        let resetSummary = (root["rate_limit_reset_credits"] as? [String: Any])
+            ?? (root["rateLimitResetCredits"] as? [String: Any])
+        let resetCredits = resetSummary.flatMap(resetCreditSnapshot)
+
+        guard limitPayload != nil || resetCredits != nil else { return nil }
+        return CodexAccountSnapshot(
+            rateLimits: rateLimits,
+            resetCredits: resetCredits,
+            rateLimitsAreAuthoritative: limitPayload != nil
+        )
+    }
+
+    private func accessToken() -> String? {
+        let authURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/auth.json")
+        guard let data = try? Data(contentsOf: authURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let tokens = root["tokens"] as? [String: Any],
+           let token = tokens["access_token"] as? String,
+           !token.isEmpty {
+            return token
+        }
+        if let token = root["access_token"] as? String, !token.isEmpty {
+            return token
+        }
+        return nil
+    }
+}
+
+private final class CodexWebUsageResponseBox {
+    private let lock = NSLock()
+    private var data: Data?
+    private var statusCode: Int?
+
+    func store(data: Data?, statusCode: Int?) {
+        lock.lock()
+        self.data = data
+        self.statusCode = statusCode
+        lock.unlock()
+    }
+
+    func value() -> (data: Data?, statusCode: Int?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (data, statusCode)
+    }
+}
+
+private func resetCreditSnapshot(from summary: [String: Any]) -> RateLimitResetCreditSnapshot? {
+    guard let availableCount = integerValue(
+        in: summary,
+        keys: ["availableCount", "available_count", "applicableAvailableCount", "applicable_available_count"]
+    ) else {
         return nil
     }
 
+    let credits = summary["credits"] as? [[String: Any]] ?? []
+    let expirationDates = credits.compactMap { credit -> Date? in
+        if let status = credit["status"] as? String, status != "available" {
+            return nil
+        }
+        for key in ["expiresAt", "expires_at"] {
+            if let timestamp = credit[key] as? NSNumber {
+                let rawTimestamp = timestamp.doubleValue
+                return Date(timeIntervalSince1970: rawTimestamp > 10_000_000_000 ? rawTimestamp / 1_000 : rawTimestamp)
+            }
+            if let timestamp = credit[key] as? String {
+                let formatter = ISO8601DateFormatter()
+                if let date = formatter.date(from: timestamp) {
+                    return date
+                }
+            }
+        }
+        return nil
+    }.sorted()
+
+    return RateLimitResetCreditSnapshot(
+        availableCount: max(0, availableCount),
+        expirationDates: expirationDates
+    )
 }
 
-private final class CodexRateLimitResetReader {
-    func latestSnapshot() -> RateLimitResetCreditSnapshot? {
+private final class CodexAccountSnapshotReader {
+    func latestSnapshot() -> CodexAccountSnapshot? {
         guard let executableURL = codexExecutableURL(), let payload = requestPayload() else {
             return nil
         }
@@ -627,8 +835,10 @@ private final class CodexRateLimitResetReader {
         let home = fileManager.homeDirectoryForCurrentUser
         var candidates: [URL] = []
 
-        if let chatGPTURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.chat") {
-            candidates.append(chatGPTURL.appendingPathComponent("Contents/Resources/codex"))
+        for bundleIdentifier in ["com.openai.codex", "com.openai.chat"] {
+            if let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+                candidates.append(applicationURL.appendingPathComponent("Contents/Resources/codex"))
+            }
         }
         candidates.append(URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"))
         candidates.append(home.appendingPathComponent("Applications/ChatGPT.app/Contents/Resources/codex"))
@@ -675,7 +885,7 @@ private final class CodexRateLimitResponseCollector {
 
     private let lock = NSLock()
     private var buffer = Data()
-    private var snapshot: RateLimitResetCreditSnapshot?
+    private var snapshot: CodexAccountSnapshot?
     private var isFinished = false
 
     func consume(_ data: Data) {
@@ -697,7 +907,7 @@ private final class CodexRateLimitResponseCollector {
         finish(with: nil)
     }
 
-    func result() -> RateLimitResetCreditSnapshot? {
+    func result() -> CodexAccountSnapshot? {
         lock.lock()
         defer { lock.unlock() }
         return snapshot
@@ -708,29 +918,37 @@ private final class CodexRateLimitResponseCollector {
               (object["id"] as? NSNumber)?.intValue == 2 else {
             return
         }
-        guard let result = object["result"] as? [String: Any],
-              let summary = result["rateLimitResetCredits"] as? [String: Any],
-              let availableCount = (summary["availableCount"] as? NSNumber)?.intValue else {
+        guard let result = object["result"] as? [String: Any] else {
             finish(with: nil)
             return
         }
 
-        let credits = summary["credits"] as? [[String: Any]] ?? []
-        let expirationDates = credits.compactMap { credit -> Date? in
-            guard credit["status"] as? String == "available",
-                  let timestamp = credit["expiresAt"] as? NSNumber else {
-                return nil
-            }
-            return Date(timeIntervalSince1970: timestamp.doubleValue)
-        }.sorted()
+        var limits = result["rateLimits"] as? [String: Any]
+        if limits == nil,
+           let buckets = result["rateLimitsByLimitId"] as? [String: Any] {
+            limits = buckets["codex"] as? [String: Any]
+        }
+        let hasRateLimitPayload = limits != nil
+        let rateLimits = limits.flatMap {
+            rateLimitSnapshot(from: $0, observedAt: Date())
+        }
 
-        finish(with: RateLimitResetCreditSnapshot(
-            availableCount: max(0, availableCount),
-            expirationDates: expirationDates
+        let resetSummary = (result["rateLimitResetCredits"] as? [String: Any])
+            ?? (result["rate_limit_reset_credits"] as? [String: Any])
+        let resetCredits = resetSummary.flatMap(resetCreditSnapshot)
+
+        guard hasRateLimitPayload || resetCredits != nil else {
+            finish(with: nil)
+            return
+        }
+        finish(with: CodexAccountSnapshot(
+            rateLimits: rateLimits,
+            resetCredits: resetCredits,
+            rateLimitsAreAuthoritative: hasRateLimitPayload
         ))
     }
 
-    private func finish(with snapshot: RateLimitResetCreditSnapshot?) {
+    private func finish(with snapshot: CodexAccountSnapshot?) {
         lock.lock()
         guard !isFinished else {
             lock.unlock()
@@ -797,7 +1015,7 @@ final class WidgetContentView: NSView {
         backgroundRing.lineWidth = 6
         backgroundRing.stroke()
 
-        if store.usedPercent > 0 {
+        if store.hasCurrentHourlyLimit && store.usedPercent > 0 {
             let ring = NSBezierPath()
             let endAngle = -90 + (360 * CGFloat(store.usedPercent) / 100)
             ring.appendArc(withCenter: NSPoint(x: ringRect.midX, y: ringRect.midY), radius: ringRect.width / 2, startAngle: -90, endAngle: endAngle, clockwise: false)
@@ -811,15 +1029,21 @@ final class WidgetContentView: NSView {
         let barBackground = NSBezierPath(roundedRect: barRect, xRadius: 3, yRadius: 3)
         NSColor.white.withAlphaComponent(0.13).setFill()
         barBackground.fill()
-        let width = max(6, barRect.width * CGFloat(store.usedPercent) / 100)
-        let barForeground = NSBezierPath(roundedRect: NSRect(x: barRect.minX, y: barRect.minY, width: width, height: barRect.height), xRadius: 3, yRadius: 3)
-        accent.setFill()
-        barForeground.fill()
+        if store.hasCurrentHourlyLimit {
+            let width = max(6, barRect.width * CGFloat(store.usedPercent) / 100)
+            let barForeground = NSBezierPath(roundedRect: NSRect(x: barRect.minX, y: barRect.minY, width: width, height: barRect.height), xRadius: 3, yRadius: 3)
+            accent.setFill()
+            barForeground.fill()
+        }
     }
 
     @objc private func refresh() {
-        percentageLabel.stringValue = String(format: "%d%%", store.usedPercent)
-        detailLabel.stringValue = store.automaticallySyncs ? automaticDescription() : resetDescription()
+        percentageLabel.stringValue = store.hasCurrentHourlyLimit ? String(format: "%d%%", store.usedPercent) : "--"
+        if store.automaticallySyncs, !store.hasCurrentHourlyLimit {
+            detailLabel.stringValue = "等待 Codex 同步 5 小时额度"
+        } else {
+            detailLabel.stringValue = store.automaticallySyncs ? automaticDescription() : resetDescription()
+        }
         updateControlVisibility()
         needsDisplay = true
     }
@@ -899,7 +1123,9 @@ final class WidgetContentView: NSView {
     }
 
     private func automaticDescription() -> String {
-        let windowText = store.secondaryUsedPercent.map { String(format: "长期 %d%%", $0) } ?? "自动同步"
+        let windowText = store.hasCurrentWeeklyLimit
+            ? store.secondaryUsedPercent.map { String(format: "长期 %d%%", $0) } ?? "自动同步"
+            : "周额度等待同步"
         return String(format: "%@ · %@", windowText, resetDescription())
     }
 
@@ -1203,18 +1429,22 @@ final class GlassIconWidgetView: NSView {
     private func detail(for kind: QuotaDetailKind) -> HoverDetail {
         switch kind {
         case .hourly:
+            let isAvailable = store.hasCurrentHourlyLimit
             return HoverDetail(
                 title: "5 小时使用限制",
-                resetText: usageResetText(for: store.resetDate),
-                usedPercent: store.usedPercent,
-                trailingText: String(format: "剩余 %d%%", 100 - store.usedPercent)
+                resetText: isAvailable ? usageResetText(for: store.resetDate) : "等待 Codex 返回 5 小时窗口",
+                usedPercent: isAvailable ? store.usedPercent : nil,
+                trailingText: isAvailable ? String(format: "剩余 %d%%", 100 - store.usedPercent) : "等待同步"
             )
         case .weekly:
-            let resetDate = store.secondaryResetDate ?? store.resetDate
-            let usedPercent = store.secondaryUsedPercent
+            let isAvailable = store.hasCurrentWeeklyLimit
+            let usedPercent = isAvailable ? store.secondaryUsedPercent : nil
+            let resetText = isAvailable
+                ? store.secondaryResetDate.map(usageResetText) ?? "等待 Codex 返回周额度窗口"
+                : "等待 Codex 返回周额度窗口"
             return HoverDetail(
                 title: "周使用限制",
-                resetText: usageResetText(for: resetDate),
+                resetText: resetText,
                 usedPercent: usedPercent,
                 trailingText: usedPercent.map { String(format: "剩余 %d%%", 100 - $0) } ?? "等待同步"
             )
@@ -2142,11 +2372,25 @@ private final class DoodleWidgetView: NSView {
     private func detail(for kind: QuotaDetailKind) -> HoverDetail {
         switch kind {
         case .hourly:
-            return HoverDetail(title: "5 小时使用限制", resetText: usageResetText(for: store.resetDate), usedPercent: store.usedPercent, trailingText: String(format: "剩余 %d%%", 100 - store.usedPercent))
+            let isAvailable = store.hasCurrentHourlyLimit
+            return HoverDetail(
+                title: "5 小时使用限制",
+                resetText: isAvailable ? usageResetText(for: store.resetDate) : "等待 Codex 返回 5 小时窗口",
+                usedPercent: isAvailable ? store.usedPercent : nil,
+                trailingText: isAvailable ? String(format: "剩余 %d%%", 100 - store.usedPercent) : "等待同步"
+            )
         case .weekly:
-            let resetDate = store.secondaryResetDate ?? store.resetDate
-            let usedPercent = store.secondaryUsedPercent
-            return HoverDetail(title: "周使用限制", resetText: usageResetText(for: resetDate), usedPercent: usedPercent, trailingText: usedPercent.map { String(format: "剩余 %d%%", 100 - $0) } ?? "等待同步")
+            let isAvailable = store.hasCurrentWeeklyLimit
+            let usedPercent = isAvailable ? store.secondaryUsedPercent : nil
+            let resetText = isAvailable
+                ? store.secondaryResetDate.map(usageResetText) ?? "等待 Codex 返回周额度窗口"
+                : "等待 Codex 返回周额度窗口"
+            return HoverDetail(
+                title: "周使用限制",
+                resetText: resetText,
+                usedPercent: usedPercent,
+                trailingText: usedPercent.map { String(format: "剩余 %d%%", 100 - $0) } ?? "等待同步"
+            )
         case .reset:
             return resetDetail()
         }

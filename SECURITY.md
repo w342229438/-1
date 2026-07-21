@@ -12,4 +12,4 @@ Open a minimal issue that describes the behavior and macOS version, or contact t
 
 ## Local data handling
 
-The widget reads local files under `~/.codex/sessions` at runtime. It does not transmit those files or make network requests. Contributors must not add session files, build artifacts, or personal screenshots to commits.
+For automatic quota sync, the widget reads the access token from `~/.codex/auth.json` and sends it only to `https://chatgpt.com/backend-api/wham/usage` over HTTPS. The token is kept in memory and is not logged or stored by the widget. Local session files under `~/.codex/sessions` are read only as a fallback and are never transmitted. Contributors must not add authentication files, session files, build artifacts, or personal screenshots to commits.
